@@ -7,6 +7,7 @@ import {
   encodeFunctionData,
   hexToNumber,
   toHex,
+  type Signature,
   type Hex,
   type Address,
 } from "viem";
@@ -215,36 +216,58 @@ async function getGaslessStatus(
 // Signature Utilities
 // =============================================================================
 
-function splitSignature(sigHex: Hex): { r: Hex; s: Hex; v: number } {
-  // Unwrap ERC-6492 if present
-  const unwrapped = (() => {
-    try {
-      const parsed = parseErc6492Signature(sigHex);
-      return (parsed?.signature ?? sigHex) as Hex;
-    } catch {
-      return sigHex;
+export type SignatureExtended = Signature & {
+  recoveryParam: number;
+};
+
+export enum SignatureType {
+  Illegal = 0,
+  Invalid = 1,
+  EIP712 = 2,
+  EthSign = 3,
+}
+
+
+async function splitSignature(signatureHex: Hex) {
+  const { r, s } = secp256k1.Signature.fromCompact(signatureHex.slice(2, 130));
+  const v = hexToNumber(`0x${signatureHex.slice(130)}`);
+  const signatureType = SignatureType.EIP712;
+
+  return padSignature({
+    v: BigInt(v),
+    r: toHex(r),
+    s: toHex(s),
+    recoveryParam: 1 - (v % 2),
+  });
+
+  /**
+   * Sometimes signatures are split without leading bytes on the `r` and/or `s` fields.
+   *
+   * Add them if they don't exist.
+   */
+  function padSignature(signature: SignatureExtended): SignatureExtended {
+    const hexLength = 64;
+
+    const result = { ...signature };
+
+    const hexExtractor = /^0(x|X)(?<hex>\w+)$/;
+    const rMatch = signature.r.match(hexExtractor);
+    const rHex = rMatch?.groups?.hex;
+    if (rHex) {
+      if (rHex.length !== hexLength) {
+        result.r = `0x${rHex.padStart(hexLength, "0")}`;
+      }
     }
-  })();
 
-  const body = unwrapped.slice(2);
-  if (body.length < 130) {
-    throw new Error("Invalid ECDSA signature: expected 65 bytes");
+    const sMatch = signature.s.match(hexExtractor);
+    const sHex = sMatch?.groups?.hex;
+    if (sHex) {
+      if (sHex.length !== hexLength) {
+        result.s = `0x${sHex.padStart(hexLength, "0")}`;
+      }
+    }
+    return result;
   }
-
-  const compact = body.slice(0, 128); // r|s
-  const vHex = body.slice(128, 130);
-
-  // Normalize r/s with noble to ensure proper padding
-  const { r: rr, s: ss } = secp256k1.Signature.fromCompact(compact);
-  const r = toHex(rr, { size: 32 }) as Hex;
-  const s = toHex(ss, { size: 32 }) as Hex;
-
-  let v = hexToNumber(`0x${vHex}`);
-  // Normalize to 27/28 for 0x
-  if (v === 0 || v === 1) v += 27;
-  if (v !== 27 && v !== 28) v = 27 + (v % 2);
-
-  return { r, s, v };
 }
 
 // =============================================================================
@@ -367,12 +390,13 @@ async function main() {
   }
 
   // 5. Sign approval EIP-712 (if Permit is supported)
+  // NOTE: Approval signatures use EOA for Permit
   let approvalSig: Hex | null = null;
   if (quote.approval) {
     console.log("\n📋 Step 5: Signing approval EIP-712 (Permit)");
     console.log("-".repeat(80));
 
-    approvalSig = await smartAccountClient.signTypedData({
+    approvalSig = await walletClient.signTypedData({
       account,
       domain: quote.approval.eip712.domain,
       types: quote.approval.eip712.types,
@@ -385,12 +409,12 @@ async function main() {
     console.log("\n📋 Step 5: No Permit signature needed");
   }
 
-  // 6. Sign trade EIP-712
+  // 6. Sign trade EIP-712 with smart account
   console.log("\n📋 Step 6: Signing trade EIP-712");
   console.log("-".repeat(80));
 
   const tradeSig = await smartAccountClient.signTypedData({
-    account,
+    account: smartAccount,
     domain: quote.trade.eip712.domain,
     types: quote.trade.eip712.types,
     primaryType: quote.trade.eip712.primaryType,
@@ -403,31 +427,38 @@ async function main() {
   console.log("\n📋 Step 7: Submitting gasless trade");
   console.log("-".repeat(80));
 
-  console.log(`Approval signature: ${approvalSig}`);
-  console.log(`Approval signature length: ${approvalSig?.length}`);
+  // Split signatures before creating submit body
+  let approvalDataToSubmit = null;
+  if (quote.approval && approvalSig) {
+    const approvalSplitSig = await splitSignature(approvalSig);
+    approvalDataToSubmit = {
+      type: quote.approval.type,
+      hash: quote.approval.hash,
+      eip712: quote.approval.eip712,
+      signature: {
+        ...approvalSplitSig,
+        v: Number(approvalSplitSig.v),
+        signatureType: SignatureType.EIP712,
+      },
+    };
+  }
+
+  const tradeSplitSig = await splitSignature(tradeSig);
+  const tradeDataToSubmit = {
+    type: quote.trade.type,
+    hash: quote.trade.hash,
+    eip712: quote.trade.eip712,
+    signature: {
+      ...tradeSplitSig,
+      v: Number(tradeSplitSig.v),
+      signatureType: SignatureType.EIP712,
+    },
+  };
 
   const submitBody = {
     chainId: CHAIN_ID,
-    approval: quote.approval
-      ? (() => {
-          const { r, s, v } = splitSignature(approvalSig!);
-          return {
-            type: quote.approval.type,
-            hash: quote.approval.hash,
-            eip712: quote.approval.eip712,
-            signature: { r, s, v, signatureType: 2 },
-          };
-        })()
-      : null,
-    trade: {
-      type: quote.trade.type,
-      hash: quote.trade.hash,
-      eip712: quote.trade.eip712,
-      signature: (() => {
-        const { r, s, v } = splitSignature(tradeSig);
-        return { r, s, v, signatureType: 2 };
-      })(),
-    },
+    approval: approvalDataToSubmit,
+    trade: tradeDataToSubmit,
   };
 
   const submitResult = await submitGasless(submitBody);
