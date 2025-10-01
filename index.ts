@@ -372,7 +372,7 @@ async function main() {
     console.log("\n📋 Step 5: Signing approval EIP-712 (Permit)");
     console.log("-".repeat(80));
 
-    approvalSig = await walletClient.signTypedData({
+    approvalSig = await smartAccountClient.signTypedData({
       account,
       domain: quote.approval.eip712.domain,
       types: quote.approval.eip712.types,
@@ -389,7 +389,7 @@ async function main() {
   console.log("\n📋 Step 6: Signing trade EIP-712");
   console.log("-".repeat(80));
 
-  const tradeSig = await walletClient.signTypedData({
+  const tradeSig = await smartAccountClient.signTypedData({
     account,
     domain: quote.trade.eip712.domain,
     types: quote.trade.eip712.types,
@@ -402,6 +402,9 @@ async function main() {
   // 7. Submit gasless trade
   console.log("\n📋 Step 7: Submitting gasless trade");
   console.log("-".repeat(80));
+
+  console.log(`Approval signature: ${approvalSig}`);
+  console.log(`Approval signature length: ${approvalSig?.length}`);
 
   const submitBody = {
     chainId: CHAIN_ID,
