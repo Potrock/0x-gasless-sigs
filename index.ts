@@ -35,7 +35,7 @@ const CHAIN_ID = CHAIN.id;
 const CHAIN_NAME = "base";
 
 // 0x API config
-const ZEROX_API_URL = "https://api.0x.org";
+const ZEROX_API_URL = "https://staging.api.0x.org";
 
 // Swap config - Example: USDC -> USDT on Base
 const SELL_TOKEN = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // USDC on Base
